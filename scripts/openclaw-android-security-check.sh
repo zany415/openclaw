@@ -1,8 +1,7 @@
 # Started by Cursor ubuntu 20260327074132903
-# Started by Cursor ubuntu 20260327075500697
-# 兼容少数 Android shell：若不支持 -u，跳过该选项，避免 "set: -: unknown option"。
-(set -u) >/dev/null 2>&1 && set -u
-# Ended by Cursor ubuntu 20260327075500697
+# Started by Cursor ubuntu 20260327075826608
+# Android 端部分 sh（尤其被 CRLF 污染时）会在 set 选项解析上异常，启动阶段不启用 set -u，改用显式参数与变量校验确保健壮性。
+# Ended by Cursor ubuntu 20260327075826608
 
 SCRIPT_NAME="openclaw-android-security-check.sh"
 VERSION="2026.03.27"

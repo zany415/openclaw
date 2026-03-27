@@ -9,6 +9,15 @@ WARN_COUNT=0
 INFO_COUNT=0
 OK_COUNT=0
 
+# Started by Cursor ubuntu 20260327083413687
+FIX_CONFIG_PERM=0
+FIX_GATEWAY=0
+FIX_TOOLS=0
+FIX_CHANNELS=0
+FIX_LOGGING=0
+FIX_DISCOVERY=0
+# Ended by Cursor ubuntu 20260327083413687
+
 NORM=""
 ROOT_OBJ=""
 GATEWAY_OBJ=""
@@ -120,14 +129,23 @@ check_file_permission_risk() {
 
   if [ $((other_digit & 2)) -ne 0 ] || [ $((group_digit & 2)) -ne 0 ]; then
     log_critical "openclaw.json 可被组用户或其他用户写入（当前权限 ${mode3}），存在配置篡改风险"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_CONFIG_PERM=1
+    # Ended by Cursor ubuntu 20260327083413687
   else
     log_ok "openclaw.json 不可被组/其他用户写入（当前权限 ${mode3}）"
   fi
 
   if [ $((other_digit & 4)) -ne 0 ]; then
     log_critical "openclaw.json 对其他用户可读（当前权限 ${mode3}），可能泄露 token/密钥"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_CONFIG_PERM=1
+    # Ended by Cursor ubuntu 20260327083413687
   elif [ $((group_digit & 4)) -ne 0 ]; then
     log_warn "openclaw.json 对组用户可读（当前权限 ${mode3}），建议收敛为 600"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_CONFIG_PERM=1
+    # Ended by Cursor ubuntu 20260327083413687
   else
     log_ok "openclaw.json 读取权限较安全（当前权限 ${mode3}）"
   fi
@@ -457,18 +475,30 @@ prepare_sections() {
 check_insecure_flags_adb() {
   if contains_key_true_in_text "$CONTROL_UI_OBJ" "allowInsecureAuth"; then
     log_warn "gateway.controlUi.allowInsecureAuth=true（兼容模式，建议关闭）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyAllowHostHeaderOriginFallback"; then
     if [ "$GATEWAY_BIND" != "loopback" ]; then
       log_critical "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true 且非 loopback 暴露"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     else
       log_warn "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true（建议关闭）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     fi
   fi
 
   if contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyDisableDeviceAuth"; then
     log_critical "gateway.controlUi.dangerouslyDisableDeviceAuth=true（高危）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_true_in_text "$HOOKS_GMAIL_OBJ" "allowUnsafeExternalContent"; then
@@ -528,12 +558,18 @@ check_gateway_auth_adb() {
 
   if [ "$GATEWAY_BIND" != "loopback" ] && [ "$AUTH_MODE" != "trusted-proxy" ] && [ "$HAS_SHARED_SECRET" -ne 1 ]; then
     log_critical "gateway.bind=${GATEWAY_BIND} 但缺少有效 auth token/password（对应 bind_no_auth 风险）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   else
     log_ok "gateway.bind/auth 组合未命中明显高危模式"
   fi
 
   if [ "$GATEWAY_BIND" = "loopback" ] && [ "$AUTH_MODE" != "trusted-proxy" ] && [ "$HAS_SHARED_SECRET" -ne 1 ]; then
     log_critical "loopback 模式下未配置有效 gateway.auth，反代场景可能出现未鉴权访问"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   TOKEN_VALUE="$(extract_scalar_from_text "$AUTH_OBJ" "token")"
@@ -541,6 +577,9 @@ check_gateway_auth_adb() {
     token_len="${#TOKEN_VALUE}"
     if [ "$token_len" -gt 0 ] && [ "$token_len" -lt 24 ]; then
       log_warn "gateway.auth.token 长度较短（${token_len}），建议至少 24 位随机串"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     fi
   fi
 }
@@ -549,8 +588,14 @@ check_gateway_exposure_adb() {
   tailscale_mode="$(extract_scalar_from_text "$TAILSCALE_OBJ" "mode")"
   if [ "$tailscale_mode" = "funnel" ]; then
     log_critical "gateway.tailscale.mode=funnel（公网暴露）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   elif [ "$tailscale_mode" = "serve" ]; then
     log_info "gateway.tailscale.mode=serve（tailnet 暴露，需保证凭据安全）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_GATEWAY=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   control_ui_enabled="$(extract_scalar_from_text "$CONTROL_UI_OBJ" "enabled")"
@@ -565,21 +610,36 @@ check_gateway_exposure_adb() {
     if array_contains_item "$allowed_origins_arr" "*"; then
       if [ "$GATEWAY_BIND" != "loopback" ]; then
         log_critical 'gateway.controlUi.allowedOrigins 包含 "*" 且网关非 loopback'
+        # Started by Cursor ubuntu 20260327083413687
+        FIX_GATEWAY=1
+        # Ended by Cursor ubuntu 20260327083413687
       else
         log_warn 'gateway.controlUi.allowedOrigins 包含 "*"（建议改为显式来源）'
+        # Started by Cursor ubuntu 20260327083413687
+        FIX_GATEWAY=1
+        # Ended by Cursor ubuntu 20260327083413687
       fi
     fi
 
     if [ "$GATEWAY_BIND" != "loopback" ] && array_is_empty "$allowed_origins_arr" && ! contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyAllowHostHeaderOriginFallback"; then
       log_critical "非 loopback 且 controlUi.allowedOrigins 为空（缺失严格来源限制）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     fi
   fi
 
   if contains_key_true_in_text "$GATEWAY_OBJ" "allowRealIpFallback"; then
     if [ "$GATEWAY_BIND" != "loopback" ]; then
       log_critical "gateway.allowRealIpFallback=true 且网关非 loopback（存在源 IP 伪造风险）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     else
       log_warn "gateway.allowRealIpFallback=true（仅在可信反代严格覆写头时使用）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_GATEWAY=1
+      # Ended by Cursor ubuntu 20260327083413687
     fi
   fi
 }
@@ -598,14 +658,23 @@ check_tool_policy_adb() {
   done
   if [ -n "$hit_list" ]; then
     log_critical "gateway.tools.allow 重新放开了 HTTP 默认拒绝高危工具: ${hit_list}"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_TOOLS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_value_in_text "$ROOT_OBJ" "security" "full"; then
     log_warn "检测到 security=full（可能扩大 exec 权限面）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_TOOLS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_true_in_text "$ROOT_OBJ" "autoAllowSkills"; then
     log_warn "检测到 autoAllowSkills=true（执行授权面增大）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_TOOLS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_true_in_text "$ROOT_OBJ" "strictInlineEval"; then
@@ -614,22 +683,34 @@ check_tool_policy_adb() {
 
   if contains_key_value_in_text "$ROOT_OBJ" "allowFrom" "*" || contains_key_value_in_text "$ROOT_OBJ" "groupAllowFrom" "*"; then
     log_critical "检测到 allowFrom/groupAllowFrom 含通配符 *（可能过度放开）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_TOOLS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 }
 
 check_channel_policy_adb() {
   if contains_key_value_in_text "$ROOT_OBJ" "dmPolicy" "open"; then
     log_warn "存在 dmPolicy=open（外部可直接触发）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_CHANNELS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 
   if contains_key_value_in_text "$ROOT_OBJ" "groupPolicy" "open"; then
     log_warn "存在 groupPolicy=open（群组触发面较大）"
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_CHANNELS=1
+    # Ended by Cursor ubuntu 20260327083413687
   fi
 }
 
 check_misc_hygiene_adb() {
   if contains_key_value_in_text "$LOGGING_OBJ" "redactSensitive" "off"; then
     log_warn 'logging.redactSensitive="off"（日志可能泄露敏感信息）'
+    # Started by Cursor ubuntu 20260327083413687
+    FIX_LOGGING=1
+    # Ended by Cursor ubuntu 20260327083413687
   else
     log_ok "日志脱敏未发现显式关闭"
   fi
@@ -638,11 +719,87 @@ check_misc_hygiene_adb() {
   if [ "$mdns_mode" = "full" ]; then
     if [ "$GATEWAY_BIND" != "loopback" ]; then
       log_critical "discovery.mdns.mode=full 且非 loopback（可能泄露主机元数据）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_DISCOVERY=1
+      # Ended by Cursor ubuntu 20260327083413687
     else
       log_warn "discovery.mdns.mode=full（建议 minimal/off）"
+      # Started by Cursor ubuntu 20260327083413687
+      FIX_DISCOVERY=1
+      # Ended by Cursor ubuntu 20260327083413687
     fi
   fi
 }
+
+# Started by Cursor ubuntu 20260327083413687
+print_short_remediation() {
+  if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARN_COUNT" -eq 0 ]; then
+    return 0
+  fi
+
+  echo
+  echo "========== 最短修复建议 =========="
+
+  if [ "$FIX_CONFIG_PERM" -eq 1 ]; then
+    echo "- 收紧配置文件权限:"
+    echo "  chmod 600 \"$CONFIG_PATH\""
+  fi
+
+  if [ "$FIX_GATEWAY" -eq 1 ]; then
+    cat <<'EOF'
+- 建议最短 gateway 安全片段（合并到 openclaw.json）:
+  {
+    "gateway": {
+      "bind": "loopback",
+      "auth": { "mode": "token", "token": "REPLACE_WITH_LONG_RANDOM_TOKEN_24_PLUS" },
+      "controlUi": {
+        "allowedOrigins": ["https://control.example.com"],
+        "dangerouslyAllowHostHeaderOriginFallback": false,
+        "dangerouslyDisableDeviceAuth": false,
+        "allowInsecureAuth": false
+      },
+      "allowRealIpFallback": false,
+      "tailscale": { "mode": "off" }
+    }
+  }
+EOF
+  fi
+
+  if [ "$FIX_TOOLS" -eq 1 ]; then
+    cat <<'EOF'
+- 建议最短 tools 收敛片段:
+  {
+    "gateway": { "tools": { "allow": [] } },
+    "tools": {
+      "exec": { "security": "allowlist", "strictInlineEval": true },
+      "elevated": { "enabled": false }
+    }
+  }
+EOF
+  fi
+
+  if [ "$FIX_CHANNELS" -eq 1 ]; then
+    cat <<'EOF'
+- 建议最短渠道策略片段:
+  {
+    "channels": {
+      "whatsapp": { "dmPolicy": "pairing", "groupPolicy": "allowlist" }
+    }
+  }
+EOF
+  fi
+
+  if [ "$FIX_LOGGING" -eq 1 ]; then
+    echo '- 建议最短日志脱敏片段: { "logging": { "redactSensitive": "tools" } }'
+  fi
+
+  if [ "$FIX_DISCOVERY" -eq 1 ]; then
+    echo '- 建议最短发现面片段: { "discovery": { "mdns": { "mode": "minimal" } } }'
+  fi
+
+  echo "=================================="
+}
+# Ended by Cursor ubuntu 20260327083413687
 
 print_summary_and_exit() {
   echo
@@ -653,6 +810,9 @@ print_summary_and_exit() {
   echo "OK:       ${OK_COUNT}"
   echo "版本:     ${VERSION}"
   echo "=================================="
+  # Started by Cursor ubuntu 20260327083413687
+  print_short_remediation
+  # Ended by Cursor ubuntu 20260327083413687
 
   if [ "$CRITICAL_COUNT" -gt 0 ]; then
     exit 2

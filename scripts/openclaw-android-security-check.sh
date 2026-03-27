@@ -1,23 +1,33 @@
-# Started by Cursor ubuntu 20260327074132903
-# Started by Cursor ubuntu 20260327075826608
-# Android 端部分 sh（尤其被 CRLF 污染时）会在 set 选项解析上异常，启动阶段不启用 set -u，改用显式参数与变量校验确保健壮性。
-# Ended by Cursor ubuntu 20260327075826608
-
-SCRIPT_NAME="openclaw-android-security-check.sh"
-VERSION="2026.03.27"
+#!/system/bin/sh
+# Started by Cursor ubuntu 20260327080618173
+SCRIPT_NAME="${0##*/}"
+VERSION="2026.03.27-adb"
+SQ=$(printf "'")
 
 CRITICAL_COUNT=0
 WARN_COUNT=0
 INFO_COUNT=0
 OK_COUNT=0
 
-HAS_JQ=0
-JQ_MODE=0
+NORM=""
+ROOT_OBJ=""
+GATEWAY_OBJ=""
+AUTH_OBJ=""
+REMOTE_OBJ=""
+CONTROL_UI_OBJ=""
+TAILSCALE_OBJ=""
+GATEWAY_TOOLS_OBJ=""
+HOOKS_OBJ=""
+HOOKS_GMAIL_OBJ=""
+LOGGING_OBJ=""
+DISCOVERY_OBJ=""
+MDNS_OBJ=""
 
 print_usage() {
   echo "用法: sh ${SCRIPT_NAME} <openclaw.json 路径>"
-  echo "示例: sh ${SCRIPT_NAME} /sdcard/openclaw/openclaw.json"
-  echo "退出码: 0=通过, 1=仅警告, 2=存在高危"
+  echo "示例: sh ${SCRIPT_NAME} /data/openclaw/home/.openclaw/openclaw.json"
+  echo "适配环境: Android adb shell（无 jq）"
+  echo "退出码: 0=通过, 1=仅警告, 2=存在高危/输入错误"
 }
 
 log_critical() {
@@ -44,44 +54,44 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-safe_trim() {
-  # 使用 awk 做跨平台 trim，避免依赖 bash 扩展。
-  printf "%s" "$1" | awk '{$1=$1; print}'
-}
-
-jq_bool() {
-  # jq 表达式返回 true/false，true=exit 0。
-  jq -e "$1" "$CONFIG_PATH" >/dev/null 2>&1
-}
-
-jq_str() {
-  jq -r "$1 // empty" "$CONFIG_PATH" 2>/dev/null
-}
-
-detect_jq_mode() {
-  if command_exists jq; then
-    HAS_JQ=1
-    if jq -e "." "$CONFIG_PATH" >/dev/null 2>&1; then
-      JQ_MODE=1
-      log_ok "检测到 jq 且配置可被 JSON 解析，将执行精准检查"
-    else
-      JQ_MODE=0
-      log_warn "检测到 jq 但配置不是严格 JSON（可能是 JSON5），降级为文本扫描模式"
-    fi
-  else
-    HAS_JQ=0
-    JQ_MODE=0
-    log_warn "未检测到 jq，降级为文本扫描模式（准确度较低）"
-  fi
+perm_triplet_to_digit() {
+  trip="$1"
+  d=0
+  case "$trip" in
+    *r*) d=$((d + 4)) ;;
+  esac
+  case "$trip" in
+    *w*) d=$((d + 2)) ;;
+  esac
+  case "$trip" in
+    *x*|*s*|*t*) d=$((d + 1)) ;;
+  esac
+  printf "%s" "$d"
 }
 
 get_mode_octal() {
-  # Android/toybox 常见为 stat -c %a；BSD/macOS 常见为 stat -f %OLp。
-  mode="$(stat -c %a "$1" 2>/dev/null || true)"
+  target="$1"
+  mode="$(stat -c %a "$target" 2>/dev/null || true)"
   if [ -z "$mode" ]; then
-    mode="$(stat -f %OLp "$1" 2>/dev/null || true)"
+    mode="$(stat -f %OLp "$target" 2>/dev/null || true)"
   fi
-  printf "%s" "$mode"
+  if [ -n "$mode" ]; then
+    printf "%s" "$mode"
+    return 0
+  fi
+
+  if command_exists ls && command_exists awk; then
+    perms="$(ls -ld "$target" 2>/dev/null | awk 'NR==1{print $1}')"
+    if [ -n "$perms" ] && [ "$(printf "%s" "$perms" | awk '{print length($0)}')" -ge 10 ]; then
+      u="$(printf "%s" "$perms" | awk '{print substr($0,2,3)}')"
+      g="$(printf "%s" "$perms" | awk '{print substr($0,5,3)}')"
+      o="$(printf "%s" "$perms" | awk '{print substr($0,8,3)}')"
+      printf "%s%s%s" "$(perm_triplet_to_digit "$u")" "$(perm_triplet_to_digit "$g")" "$(perm_triplet_to_digit "$o")"
+      return 0
+    fi
+  fi
+
+  printf ""
 }
 
 check_file_permission_risk() {
@@ -91,7 +101,6 @@ check_file_permission_risk() {
     return 0
   fi
 
-  # 只取后 3 位权限位（忽略特殊位）。
   case "$mode_raw" in
     ?????*) mode3="$(printf "%s" "$mode_raw" | sed 's/.*\(...\)$/\1/')" ;;
     ????) mode3="${mode_raw#?}" ;;
@@ -124,208 +133,515 @@ check_file_permission_risk() {
   fi
 }
 
-check_insecure_flags_jq() {
-  if jq_bool '.gateway.controlUi.allowInsecureAuth? == true'; then
+sanitize_json5_with_awk() {
+  awk '
+BEGIN {
+  in_block = 0
+  in_string = 0
+  quote = ""
+  escaped = 0
+}
+{
+  line = $0
+  gsub(/\r/, "", line)
+  out = ""
+  i = 1
+  while (i <= length(line)) {
+    c = substr(line, i, 1)
+    n = (i < length(line) ? substr(line, i + 1, 1) : "")
+
+    if (in_block == 1) {
+      if (c == "*" && n == "/") {
+        in_block = 0
+        i += 2
+        continue
+      }
+      i++
+      continue
+    }
+
+    if (in_string == 1) {
+      out = out c
+      if (escaped == 1) {
+        escaped = 0
+      } else if (c == "\\") {
+        escaped = 1
+      } else if (c == quote) {
+        in_string = 0
+        quote = ""
+      }
+      i++
+      continue
+    }
+
+    if (c == "\"" || c == sprintf("%c", 39)) {
+      in_string = 1
+      quote = c
+      out = out c
+      i++
+      continue
+    }
+
+    if (c == "/" && n == "*") {
+      in_block = 1
+      i += 2
+      continue
+    }
+
+    if (c == "/" && n == "/") {
+      break
+    }
+
+    out = out c
+    i++
+  }
+  print out
+}' "$CONFIG_PATH"
+}
+
+build_normalized_text() {
+  if command_exists awk; then
+    raw="$(sanitize_json5_with_awk 2>/dev/null || true)"
+  else
+    raw="$(tr -d '\r' < "$CONFIG_PATH" 2>/dev/null || true)"
+    log_warn "系统无 awk，注释剥离能力受限，结果可能偏保守"
+  fi
+
+  NORM="$(printf "%s" "$raw" | tr -d ' \t\r\n')"
+  if [ -z "$NORM" ]; then
+    log_critical "配置内容为空或无法解析（预处理后为空）"
+    return 1
+  fi
+
+  ROOT_OBJ="$NORM"
+  return 0
+}
+
+extract_object_from_text() {
+  text="$1"
+  key="$2"
+  if [ -z "$text" ] || [ -z "$key" ] || ! command_exists awk; then
+    printf ""
+    return 1
+  fi
+  printf "%s" "$text" | awk -v key="$key" '
+function min3(a, b, c,   m) {
+  m = 0
+  if (a > 0) m = a
+  if (b > 0 && (m == 0 || b < m)) m = b
+  if (c > 0 && (m == 0 || c < m)) m = c
+  return m
+}
+{
+  s = $0
+  sq = sprintf("%c", 39)
+  p1 = index(s, "\"" key "\":{")
+  p2 = index(s, sq key sq ":{")
+  p3 = index(s, key ":{")
+  p = min3(p1, p2, p3)
+  if (p == 0) exit 1
+
+  if (p == p1) start = p + length("\"" key "\":")
+  else if (p == p2) start = p + length(sq key sq ":")
+  else start = p + length(key ":")
+
+  depth = 0
+  in_str = 0
+  q = ""
+  esc = 0
+  out = ""
+  for (i = start; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    out = out c
+    if (in_str == 1) {
+      if (esc == 1) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == q) {
+        in_str = 0
+        q = ""
+      }
+    } else {
+      if (c == "\"" || c == sq) {
+        in_str = 1
+        q = c
+      } else if (c == "{") depth++
+      else if (c == "}") {
+        depth--
+        if (depth == 0) {
+          print out
+          exit 0
+        }
+      }
+    }
+  }
+  exit 1
+}'
+}
+
+extract_array_from_text() {
+  text="$1"
+  key="$2"
+  if [ -z "$text" ] || [ -z "$key" ] || ! command_exists awk; then
+    printf ""
+    return 1
+  fi
+  printf "%s" "$text" | awk -v key="$key" '
+function min3(a, b, c,   m) {
+  m = 0
+  if (a > 0) m = a
+  if (b > 0 && (m == 0 || b < m)) m = b
+  if (c > 0 && (m == 0 || c < m)) m = c
+  return m
+}
+{
+  s = $0
+  sq = sprintf("%c", 39)
+  p1 = index(s, "\"" key "\":[")
+  p2 = index(s, sq key sq ":[")
+  p3 = index(s, key ":[")
+  p = min3(p1, p2, p3)
+  if (p == 0) exit 1
+
+  if (p == p1) start = p + length("\"" key "\":")
+  else if (p == p2) start = p + length(sq key sq ":")
+  else start = p + length(key ":")
+
+  depth = 0
+  in_str = 0
+  q = ""
+  esc = 0
+  out = ""
+  for (i = start; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    out = out c
+    if (in_str == 1) {
+      if (esc == 1) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == q) {
+        in_str = 0
+        q = ""
+      }
+    } else {
+      if (c == "\"" || c == sq) {
+        in_str = 1
+        q = c
+      } else if (c == "[") depth++
+      else if (c == "]") {
+        depth--
+        if (depth == 0) {
+          print out
+          exit 0
+        }
+      }
+    }
+  }
+  exit 1
+}'
+}
+
+extract_scalar_from_text() {
+  text="$1"
+  key="$2"
+  if [ -z "$text" ] || [ -z "$key" ] || ! command_exists awk; then
+    printf ""
+    return 1
+  fi
+  printf "%s" "$text" | awk -v key="$key" '
+function try(prefix,   pos, rest, c, q, i, ch, out) {
+  pos = index(s, prefix)
+  if (pos == 0) return 0
+  rest = substr(s, pos + length(prefix))
+  c = substr(rest, 1, 1)
+  sq = sprintf("%c", 39)
+  if (c == "\"" || c == sq) {
+    q = c
+    out = ""
+    for (i = 2; i <= length(rest); i++) {
+      ch = substr(rest, i, 1)
+      if (ch == "\\") {
+        i++
+        if (i <= length(rest)) out = out substr(rest, i, 1)
+        continue
+      }
+      if (ch == q) {
+        print out
+        return 1
+      }
+      out = out ch
+    }
+    return 0
+  }
+  if (match(rest, /^[A-Za-z0-9_.-]+/)) {
+    print substr(rest, RSTART, RLENGTH)
+    return 1
+  }
+  return 0
+}
+{
+  s = $0
+  sq = sprintf("%c", 39)
+  if (try("\"" key "\":")) exit 0
+  if (try(sq key sq ":")) exit 0
+  if (try(key ":")) exit 0
+  exit 1
+}'
+}
+
+contains_key_true_in_text() {
+  text="$1"
+  key="$2"
+  case "$text" in
+    *"\"$key\":true"*|*"$SQ$key$SQ:true"*|*"$key:true"*) return 0 ;;
+  esac
+  return 1
+}
+
+contains_key_value_in_text() {
+  text="$1"
+  key="$2"
+  value="$3"
+  case "$text" in
+    *"\"$key\":\"$value\""*|*"$SQ$key$SQ:$SQ$value$SQ"*|*"\"$key\":$value"*|*"$SQ$key$SQ:$value"*|*"$key:\"$value\""*|*"$key:$value"*) return 0 ;;
+  esac
+  return 1
+}
+
+key_has_nonempty_value_in_text() {
+  text="$1"
+  key="$2"
+  case "$text" in
+    *"\"$key\":{"*|*"$SQ$key$SQ:{"*|*"$key:{"*) return 0 ;;
+  esac
+  val="$(extract_scalar_from_text "$text" "$key")"
+  if [ -n "$val" ] && [ "$val" != "null" ]; then
+    return 0
+  fi
+  return 1
+}
+
+array_contains_item() {
+  arr="$1"
+  item="$2"
+  case "$arr" in
+    *"\"$item\""*|*"$SQ$item$SQ"*|*"[$item,"*|*",$item,"*|*",$item]"*|*"[$item]"*) return 0 ;;
+  esac
+  return 1
+}
+
+array_is_empty() {
+  arr="$1"
+  case "$arr" in
+    ""|"[]") return 0 ;;
+  esac
+  return 1
+}
+
+prepare_sections() {
+  GATEWAY_OBJ="$(extract_object_from_text "$ROOT_OBJ" "gateway")"
+  if [ -z "$GATEWAY_OBJ" ]; then
+    GATEWAY_OBJ="$ROOT_OBJ"
+    log_warn "未明确解析出 gateway 对象，将按全局保守规则检查"
+  fi
+  AUTH_OBJ="$(extract_object_from_text "$GATEWAY_OBJ" "auth")"
+  REMOTE_OBJ="$(extract_object_from_text "$GATEWAY_OBJ" "remote")"
+  CONTROL_UI_OBJ="$(extract_object_from_text "$GATEWAY_OBJ" "controlUi")"
+  TAILSCALE_OBJ="$(extract_object_from_text "$GATEWAY_OBJ" "tailscale")"
+  GATEWAY_TOOLS_OBJ="$(extract_object_from_text "$GATEWAY_OBJ" "tools")"
+  HOOKS_OBJ="$(extract_object_from_text "$ROOT_OBJ" "hooks")"
+  HOOKS_GMAIL_OBJ="$(extract_object_from_text "$HOOKS_OBJ" "gmail")"
+  LOGGING_OBJ="$(extract_object_from_text "$ROOT_OBJ" "logging")"
+  DISCOVERY_OBJ="$(extract_object_from_text "$ROOT_OBJ" "discovery")"
+  MDNS_OBJ="$(extract_object_from_text "$DISCOVERY_OBJ" "mdns")"
+}
+
+check_insecure_flags_adb() {
+  if contains_key_true_in_text "$CONTROL_UI_OBJ" "allowInsecureAuth"; then
     log_warn "gateway.controlUi.allowInsecureAuth=true（兼容模式，建议关闭）"
   fi
 
-  if jq_bool '.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback? == true'; then
-    if jq_bool '(.gateway.bind? // "loopback") != "loopback"'; then
+  if contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyAllowHostHeaderOriginFallback"; then
+    if [ "$GATEWAY_BIND" != "loopback" ]; then
       log_critical "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true 且非 loopback 暴露"
     else
       log_warn "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true（建议关闭）"
     fi
   fi
 
-  if jq_bool '.gateway.controlUi.dangerouslyDisableDeviceAuth? == true'; then
+  if contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyDisableDeviceAuth"; then
     log_critical "gateway.controlUi.dangerouslyDisableDeviceAuth=true（高危）"
   fi
 
-  if jq_bool '.hooks.gmail.allowUnsafeExternalContent? == true'; then
+  if contains_key_true_in_text "$HOOKS_GMAIL_OBJ" "allowUnsafeExternalContent"; then
     log_warn "hooks.gmail.allowUnsafeExternalContent=true（外部内容安全包装被绕过）"
   fi
 
-  if jq_bool '.hooks.mappings? | arrays and any(.allowUnsafeExternalContent? == true)'; then
-    log_warn "hooks.mappings[].allowUnsafeExternalContent=true（存在外部内容绕过）"
+  if contains_key_true_in_text "$HOOKS_OBJ" "allowUnsafeExternalContent"; then
+    log_warn "hooks.mappings 或其他 hooks 区域存在 allowUnsafeExternalContent=true"
   fi
 
-  if jq_bool '.tools.exec.applyPatch.workspaceOnly? == false'; then
-    log_warn "tools.exec.applyPatch.workspaceOnly=false（允许越过工作区写入）"
+  if contains_key_value_in_text "$ROOT_OBJ" "workspaceOnly" "false"; then
+    log_warn "检测到 workspaceOnly=false（可能扩大文件写入边界）"
   fi
 }
 
-check_gateway_auth_jq() {
-  bind="$(jq_str '.gateway.bind' )"
-  bind="$(safe_trim "${bind:-loopback}")"
-  if [ -z "$bind" ]; then
-    bind="loopback"
+check_gateway_auth_adb() {
+  GATEWAY_BIND="$(extract_scalar_from_text "$GATEWAY_OBJ" "bind")"
+  if [ -z "$GATEWAY_BIND" ]; then
+    GATEWAY_BIND="loopback"
   fi
 
-  auth_mode="$(jq_str '.gateway.auth.mode')"
-  auth_mode="$(safe_trim "${auth_mode:-}")"
-  if [ -z "$auth_mode" ]; then
-    auth_mode="token"
+  AUTH_MODE="$(extract_scalar_from_text "$AUTH_OBJ" "mode")"
+  if [ -z "$AUTH_MODE" ]; then
+    AUTH_MODE="token"
   fi
 
-  has_token=0
-  if jq_bool '(.gateway.auth.token? // null) as $t | (($t|type) == "string" and (($t|gsub("^\\s+|\\s+$";""))|length) > 0) or (($t|type) == "object")'; then
-    has_token=1
+  HAS_TOKEN=0
+  HAS_PASSWORD=0
+  HAS_REMOTE_TOKEN=0
+
+  if key_has_nonempty_value_in_text "$AUTH_OBJ" "token"; then
+    HAS_TOKEN=1
+  fi
+  if key_has_nonempty_value_in_text "$AUTH_OBJ" "password"; then
+    HAS_PASSWORD=1
+  fi
+  if key_has_nonempty_value_in_text "$REMOTE_OBJ" "token"; then
+    HAS_REMOTE_TOKEN=1
   fi
 
-  has_password=0
-  if jq_bool '(.gateway.auth.password? // null) as $p | (($p|type) == "string" and (($p|gsub("^\\s+|\\s+$";""))|length) > 0) or (($p|type) == "object")'; then
-    has_password=1
-  fi
-
-  has_remote_token=0
-  if jq_bool '(.gateway.remote.token? // null) as $t | (($t|type) == "string" and (($t|gsub("^\\s+|\\s+$";""))|length) > 0) or (($t|type) == "object")'; then
-    has_remote_token=1
-  fi
-
-  has_shared_secret=0
-  if [ "$auth_mode" = "token" ]; then
-    if [ "$has_token" -eq 1 ] || [ "$has_remote_token" -eq 1 ]; then
-      has_shared_secret=1
+  HAS_SHARED_SECRET=0
+  if [ "$AUTH_MODE" = "token" ]; then
+    if [ "$HAS_TOKEN" -eq 1 ] || [ "$HAS_REMOTE_TOKEN" -eq 1 ]; then
+      HAS_SHARED_SECRET=1
     fi
-  elif [ "$auth_mode" = "password" ]; then
-    if [ "$has_password" -eq 1 ]; then
-      has_shared_secret=1
+  elif [ "$AUTH_MODE" = "password" ]; then
+    if [ "$HAS_PASSWORD" -eq 1 ]; then
+      HAS_SHARED_SECRET=1
     fi
-  elif [ "$auth_mode" = "none" ] || [ "$auth_mode" = "trusted-proxy" ]; then
-    has_shared_secret=0
+  elif [ "$AUTH_MODE" = "none" ] || [ "$AUTH_MODE" = "trusted-proxy" ]; then
+    HAS_SHARED_SECRET=0
   else
-    if [ "$has_token" -eq 1 ] || [ "$has_password" -eq 1 ] || [ "$has_remote_token" -eq 1 ]; then
-      has_shared_secret=1
+    if [ "$HAS_TOKEN" -eq 1 ] || [ "$HAS_PASSWORD" -eq 1 ] || [ "$HAS_REMOTE_TOKEN" -eq 1 ]; then
+      HAS_SHARED_SECRET=1
     fi
   fi
 
-  if [ "$bind" != "loopback" ] && [ "$auth_mode" != "trusted-proxy" ] && [ "$has_shared_secret" -ne 1 ]; then
-    log_critical "gateway.bind=${bind} 但缺少有效 auth token/password（对应 gateway.bind_no_auth 风险）"
+  if [ "$GATEWAY_BIND" != "loopback" ] && [ "$AUTH_MODE" != "trusted-proxy" ] && [ "$HAS_SHARED_SECRET" -ne 1 ]; then
+    log_critical "gateway.bind=${GATEWAY_BIND} 但缺少有效 auth token/password（对应 bind_no_auth 风险）"
   else
     log_ok "gateway.bind/auth 组合未命中明显高危模式"
   fi
 
-  if [ "$bind" = "loopback" ] && [ "$auth_mode" != "trusted-proxy" ] && [ "$has_shared_secret" -ne 1 ]; then
+  if [ "$GATEWAY_BIND" = "loopback" ] && [ "$AUTH_MODE" != "trusted-proxy" ] && [ "$HAS_SHARED_SECRET" -ne 1 ]; then
     log_critical "loopback 模式下未配置有效 gateway.auth，反代场景可能出现未鉴权访问"
   fi
 
-  if jq_bool '.gateway.auth.mode? == "token" and (.gateway.auth.token? | type == "string") and ((.gateway.auth.token|length) > 0) and ((.gateway.auth.token|length) < 24)'; then
-    token_len="$(jq_str '.gateway.auth.token | length')"
-    log_warn "gateway.auth.token 长度较短（${token_len}），建议至少 24 位随机串"
+  TOKEN_VALUE="$(extract_scalar_from_text "$AUTH_OBJ" "token")"
+  if [ "$AUTH_MODE" = "token" ] && [ -n "$TOKEN_VALUE" ]; then
+    token_len="${#TOKEN_VALUE}"
+    if [ "$token_len" -gt 0 ] && [ "$token_len" -lt 24 ]; then
+      log_warn "gateway.auth.token 长度较短（${token_len}），建议至少 24 位随机串"
+    fi
   fi
 }
 
-check_gateway_exposure_jq() {
-  if jq_bool '.gateway.tailscale.mode? == "funnel"'; then
+check_gateway_exposure_adb() {
+  tailscale_mode="$(extract_scalar_from_text "$TAILSCALE_OBJ" "mode")"
+  if [ "$tailscale_mode" = "funnel" ]; then
     log_critical "gateway.tailscale.mode=funnel（公网暴露）"
-  elif jq_bool '.gateway.tailscale.mode? == "serve"'; then
+  elif [ "$tailscale_mode" = "serve" ]; then
     log_info "gateway.tailscale.mode=serve（tailnet 暴露，需保证凭据安全）"
   fi
 
-  if jq_bool '(.gateway.controlUi.enabled? // true) == true and (.gateway.controlUi.allowedOrigins? | arrays and any(. == "*"))'; then
-    if jq_bool '(.gateway.bind? // "loopback") != "loopback"'; then
-      log_critical 'gateway.controlUi.allowedOrigins 包含 "*" 且网关非 loopback'
-    else
-      log_warn 'gateway.controlUi.allowedOrigins 包含 "*"（建议改为显式来源）'
+  control_ui_enabled="$(extract_scalar_from_text "$CONTROL_UI_OBJ" "enabled")"
+  if [ "$control_ui_enabled" = "false" ]; then
+    control_ui_enabled="false"
+  else
+    control_ui_enabled="true"
+  fi
+
+  allowed_origins_arr="$(extract_array_from_text "$CONTROL_UI_OBJ" "allowedOrigins")"
+  if [ "$control_ui_enabled" = "true" ]; then
+    if array_contains_item "$allowed_origins_arr" "*"; then
+      if [ "$GATEWAY_BIND" != "loopback" ]; then
+        log_critical 'gateway.controlUi.allowedOrigins 包含 "*" 且网关非 loopback'
+      else
+        log_warn 'gateway.controlUi.allowedOrigins 包含 "*"（建议改为显式来源）'
+      fi
+    fi
+
+    if [ "$GATEWAY_BIND" != "loopback" ] && array_is_empty "$allowed_origins_arr" && ! contains_key_true_in_text "$CONTROL_UI_OBJ" "dangerouslyAllowHostHeaderOriginFallback"; then
+      log_critical "非 loopback 且 controlUi.allowedOrigins 为空（缺失严格来源限制）"
     fi
   fi
 
-  if jq_bool '(.gateway.bind? // "loopback") != "loopback" and (.gateway.controlUi.enabled? // true) == true and ((.gateway.controlUi.allowedOrigins? // []) | length == 0) and (.gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback? != true)'; then
-    log_critical "非 loopback 且 control UI 未设置 allowedOrigins（缺失严格来源限制）"
+  if contains_key_true_in_text "$GATEWAY_OBJ" "allowRealIpFallback"; then
+    if [ "$GATEWAY_BIND" != "loopback" ]; then
+      log_critical "gateway.allowRealIpFallback=true 且网关非 loopback（存在源 IP 伪造风险）"
+    else
+      log_warn "gateway.allowRealIpFallback=true（仅在可信反代严格覆写头时使用）"
+    fi
   fi
 }
 
-check_tool_policy_jq() {
-  # 对齐 src/security/dangerous-tools.ts 默认高危清单
-  if jq_bool '(.gateway.tools.allow? // []) | arrays and any(. == "sessions_spawn" or . == "sessions_send" or . == "cron" or . == "gateway" or . == "whatsapp_login")'; then
-    hit_list="$(jq -r '(.gateway.tools.allow? // []) | map(select(. == "sessions_spawn" or . == "sessions_send" or . == "cron" or . == "gateway" or . == "whatsapp_login")) | unique | join(",")' "$CONFIG_PATH" 2>/dev/null)"
+check_tool_policy_adb() {
+  hit_list=""
+  allow_arr="$(extract_array_from_text "$GATEWAY_TOOLS_OBJ" "allow")"
+  for item in sessions_spawn sessions_send cron gateway whatsapp_login; do
+    if array_contains_item "$allow_arr" "$item"; then
+      if [ -z "$hit_list" ]; then
+        hit_list="$item"
+      else
+        hit_list="${hit_list},${item}"
+      fi
+    fi
+  done
+  if [ -n "$hit_list" ]; then
     log_critical "gateway.tools.allow 重新放开了 HTTP 默认拒绝高危工具: ${hit_list}"
   fi
 
-  if jq_bool '.tools.exec.security? == "full"'; then
-    log_warn "tools.exec.security=full（执行面过宽）"
+  if contains_key_value_in_text "$ROOT_OBJ" "security" "full"; then
+    log_warn "检测到 security=full（可能扩大 exec 权限面）"
   fi
 
-  if jq_bool '.agents.list? | arrays and any(.tools.exec.security? == "full")'; then
-    log_warn "agents.list[].tools.exec.security 存在 full（建议收敛到 allowlist）"
+  if contains_key_true_in_text "$ROOT_OBJ" "autoAllowSkills"; then
+    log_warn "检测到 autoAllowSkills=true（执行授权面增大）"
   fi
 
-  if jq_bool '.tools.elevated.enabled? != false and (.tools.elevated.allowFrom? | type == "object") and ([.tools.elevated.allowFrom[]? | arrays | any(. == "*")] | any)'; then
-    log_critical "tools.elevated.allowFrom 存在通配符 *（高危提权面）"
-  fi
-}
-
-check_channel_policy_jq() {
-  if jq_bool '.channels? | type == "object" and ([.channels[]? | objects | .dmPolicy? // empty | select(. == "open")] | length > 0)'; then
-    log_warn "存在 channels.*.dmPolicy=open（外部可直接触发）"
+  if contains_key_true_in_text "$ROOT_OBJ" "strictInlineEval"; then
+    log_info "检测到 strictInlineEval=true（解释器内联执行防护已开启）"
   fi
 
-  if jq_bool '.channels? | type == "object" and ([.channels[]? | objects | .groupPolicy? // empty | select(. == "open")] | length > 0)'; then
-    log_warn "存在 channels.*.groupPolicy=open（群组触发面较大）"
-  fi
-
-  if jq_bool '.channels? | type == "object" and ([.channels[]? | objects | .accounts? | objects | .[]? | objects | .groupPolicy? // empty | select(. == "open")] | length > 0)'; then
-    log_warn "存在 channels.*.accounts.*.groupPolicy=open"
+  if contains_key_value_in_text "$ROOT_OBJ" "allowFrom" "*" || contains_key_value_in_text "$ROOT_OBJ" "groupAllowFrom" "*"; then
+    log_critical "检测到 allowFrom/groupAllowFrom 含通配符 *（可能过度放开）"
   fi
 }
 
-check_misc_hygiene_jq() {
-  if jq_bool '.logging.redactSensitive? == "off"'; then
+check_channel_policy_adb() {
+  if contains_key_value_in_text "$ROOT_OBJ" "dmPolicy" "open"; then
+    log_warn "存在 dmPolicy=open（外部可直接触发）"
+  fi
+
+  if contains_key_value_in_text "$ROOT_OBJ" "groupPolicy" "open"; then
+    log_warn "存在 groupPolicy=open（群组触发面较大）"
+  fi
+}
+
+check_misc_hygiene_adb() {
+  if contains_key_value_in_text "$LOGGING_OBJ" "redactSensitive" "off"; then
     log_warn 'logging.redactSensitive="off"（日志可能泄露敏感信息）'
   else
     log_ok "日志脱敏未发现显式关闭"
   fi
 
-  if jq_bool '.discovery.mdns.mode? == "full"'; then
-    if jq_bool '(.gateway.bind? // "loopback") != "loopback"'; then
+  mdns_mode="$(extract_scalar_from_text "$MDNS_OBJ" "mode")"
+  if [ "$mdns_mode" = "full" ]; then
+    if [ "$GATEWAY_BIND" != "loopback" ]; then
       log_critical "discovery.mdns.mode=full 且非 loopback（可能泄露主机元数据）"
     else
       log_warn "discovery.mdns.mode=full（建议 minimal/off）"
     fi
   fi
-}
-
-check_text_scan_fallback() {
-  raw="$(cat "$CONFIG_PATH" 2>/dev/null || true)"
-  if [ -z "$raw" ]; then
-    log_critical "无法读取配置内容"
-    return 0
-  fi
-
-  # 文本扫描不保证精确，仅用于低依赖环境兜底。
-  case "$raw" in
-    *'"dangerouslyDisableDeviceAuth"'*:*true*) log_critical "命中 dangerouslyDisableDeviceAuth=true（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"dangerouslyAllowHostHeaderOriginFallback"'*:*true*) log_warn "命中 dangerouslyAllowHostHeaderOriginFallback=true（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"allowInsecureAuth"'*:*true*) log_warn "命中 allowInsecureAuth=true（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"allowUnsafeExternalContent"'*:*true*) log_warn "命中 allowUnsafeExternalContent=true（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"workspaceOnly"'*:*false*) log_warn "命中 workspaceOnly=false（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"groupPolicy"'*:*'"open"'*) log_warn "命中 groupPolicy=open（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"dmPolicy"'*:*'"open"'*) log_warn "命中 dmPolicy=open（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"security"'*:*'"full"'*) log_warn "命中 exec security=full（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"tailscale"'*'"mode"'*'"funnel"'*) log_critical "命中 tailscale funnel 暴露（文本扫描）" ;;
-  esac
-  case "$raw" in
-    *'"allowedOrigins"'*'"*"'*) log_warn '命中 controlUi allowedOrigins="*"（文本扫描）' ;;
-  esac
-  case "$raw" in
-    *'"gateway"'*'"tools"'*'"allow"'*'"sessions_spawn"'*) log_critical "命中 gateway.tools.allow 高危项 sessions_spawn（文本扫描）" ;;
-  esac
 }
 
 print_summary_and_exit() {
@@ -377,21 +693,20 @@ main() {
 
   log_info "开始检查: $CONFIG_PATH"
   check_file_permission_risk
-  detect_jq_mode
 
-  if [ "$JQ_MODE" -eq 1 ]; then
-    check_insecure_flags_jq
-    check_gateway_auth_jq
-    check_gateway_exposure_jq
-    check_tool_policy_jq
-    check_channel_policy_jq
-    check_misc_hygiene_jq
-  else
-    check_text_scan_fallback
+  if ! build_normalized_text; then
+    print_summary_and_exit
   fi
+  prepare_sections
+  check_gateway_auth_adb
+  check_insecure_flags_adb
+  check_gateway_exposure_adb
+  check_tool_policy_adb
+  check_channel_policy_adb
+  check_misc_hygiene_adb
 
   print_summary_and_exit
 }
 
 main "$@"
-# Ended by Cursor ubuntu 20260327074132903
+# Ended by Cursor ubuntu 20260327080618173

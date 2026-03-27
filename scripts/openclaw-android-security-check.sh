@@ -1,5 +1,8 @@
 # Started by Cursor ubuntu 20260327074132903
-set -u
+# Started by Cursor ubuntu 20260327075500697
+# 兼容少数 Android shell：若不支持 -u，跳过该选项，避免 "set: -: unknown option"。
+(set -u) >/dev/null 2>&1 && set -u
+# Ended by Cursor ubuntu 20260327075500697
 
 SCRIPT_NAME="openclaw-android-security-check.sh"
 VERSION="2026.03.27"
